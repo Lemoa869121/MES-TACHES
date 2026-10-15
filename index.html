@@ -183,7 +183,10 @@ if ('serviceWorker' in navigator) {
         <h1>Mon organisateur</h1>
         <p id="todayLabel"></p>
       </div>
-      <button class="icon-btn" id="notificationBtn" aria-label="Activer les notifications" title="Notifications">🔔</button>
+      <div style="display:flex;gap:8px">
+        <button class="icon-btn" id="backupBtn" aria-label="Sauvegarde" title="Sauvegarde">💾</button>
+        <button class="icon-btn" id="notificationBtn" aria-label="Activer les notifications" title="Notifications">🔔</button>
+      </div>
     </header>
 
     <section class="summary" aria-label="Résumé">
@@ -287,6 +290,21 @@ if ('serviceWorker' in navigator) {
     </section>
   </div>
 
+  <div class="modal" id="backupModal" role="dialog" aria-modal="true" aria-labelledby="backupTitle">
+    <section class="sheet">
+      <header class="sheet-head">
+        <h2 id="backupTitle">Sauvegarde</h2>
+        <button class="close" id="closeBackup" aria-label="Fermer">✕</button>
+      </header>
+      <p style="color:var(--muted);margin-top:0">Exporte tes tâches dans un fichier, ou remplace-les par celles d'un fichier exporté.</p>
+      <div class="actions">
+        <button class="secondary-btn" id="exportBtn" type="button">⬇ Exporter</button>
+        <button class="primary-btn" id="importBtn" type="button">⬆ Importer</button>
+      </div>
+      <input type="file" id="importFile" accept=".json,application/json,text/plain" class="hidden">
+    </section>
+  </div>
+
   <div class="toast" id="toast" role="status"></div>
 
   <script>
@@ -300,7 +318,57 @@ if ('serviceWorker' in navigator) {
         try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; }
         catch { return []; }
       }
-      function saveTasks() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state.tasks)); }
+      function saveTasks() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state.tasks)); pushToWidget(); }
+
+      // --- Application Android : envoie les 5 prochaines tâches au widget ---
+      const IN_ANDROID_APP = typeof window.AndroidWidget !== 'undefined';
+      function pushToWidget() {
+        if (!IN_ANDROID_APP) return;
+        try {
+          const next = state.tasks
+            .filter(t => !t.done && t.dueDate)
+            .sort((a,b) => a.dueDate.localeCompare(b.dueDate) || (a.dueTime || '99:99').localeCompare(b.dueTime || '99:99') || priorityRank(a.priority) - priorityRank(b.priority))
+            .slice(0, 5)
+            .map(t => ({ id: t.id, title: t.title, project: t.project || '', dueDate: t.dueDate, dueTime: t.dueTime || '', priority: t.priority, color: t.color || COLORS[0] }));
+          window.AndroidWidget.updateTasks(JSON.stringify({ tasks: next }));
+        } catch (e) { console.warn('Widget non mis à jour', e); }
+      }
+
+      // --- Sauvegarde : export / import ---
+      function exportTasks() {
+        const json = JSON.stringify({ app: 'mes-taches', version: 1, exportedAt: new Date().toISOString(), tasks: state.tasks }, null, 2);
+        const filename = `mes-taches-${localDateKey()}.json`;
+        if (IN_ANDROID_APP && window.AndroidWidget.shareBackup) { window.AndroidWidget.shareBackup(json, filename); return; }
+        const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+        const a = document.createElement('a'); a.href = url; a.download = filename;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+        showToast('Sauvegarde téléchargée');
+      }
+      function importTasks(file) {
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const data = JSON.parse(reader.result);
+            const tasks = Array.isArray(data) ? data : data.tasks;
+            if (!Array.isArray(tasks) || tasks.some(t => !t || !t.id || !t.title)) throw new Error('format');
+            if (!confirm(`Remplacer tes ${state.tasks.length} tâche(s) actuelle(s) par les ${tasks.length} du fichier ?`)) return;
+            state.tasks = tasks.map(t => ({ subtasks: [], notes: '', project: '', priority: 'medium', recurrence: 'none', reminder: 'none', ...t }));
+            saveTasks(); render(); closeBackup(); showToast(`${tasks.length} tâche(s) importée(s)`);
+          } catch { showToast('Fichier invalide'); }
+        };
+        reader.readAsText(file);
+      }
+      function openBackup() { $('backupModal').classList.add('open'); }
+      function closeBackup() { $('backupModal').classList.remove('open'); }
+
+      // Bouton « retour » d'Android : ferme d'abord la fenêtre ouverte
+      window.__handleBack = () => {
+        if ($('taskModal').classList.contains('open')) { closeModal(); return true; }
+        if ($('backupModal').classList.contains('open')) { closeBackup(); return true; }
+        return false;
+      };
       function uid() { return (crypto.randomUUID?.() || Date.now() + '-' + Math.random().toString(16).slice(2)); }
       function localDateKey(date = new Date()) {
         const y = date.getFullYear();
@@ -455,7 +523,7 @@ if ('serviceWorker' in navigator) {
         state.tasks = state.tasks.filter(t => t.id !== id); saveTasks(); closeModal(); render(); showToast('Tâche supprimée');
       }
       async function requestNotifications() {
-        if (!('Notification' in window)) return showToast('Notifications non prises en charge');
+        if (!('Notification' in window)) return showToast(IN_ANDROID_APP ? 'Rappels bientôt disponibles dans l\'appli' : 'Notifications non prises en charge');
         const result = await Notification.requestPermission();
         showToast(result === 'granted' ? 'Notifications activées' : 'Notifications refusées');
         updateNotificationButton();
@@ -505,10 +573,16 @@ if ('serviceWorker' in navigator) {
       $('searchInput').addEventListener('input', e => { state.search = e.target.value.trim().toLowerCase(); renderTasks(); });
       $('projectFilter').addEventListener('change', e => { state.project = e.target.value; renderTasks(); });
       $('notificationBtn').addEventListener('click', requestNotifications);
+      $('backupBtn').addEventListener('click', openBackup);
+      $('closeBackup').addEventListener('click', closeBackup);
+      $('backupModal').addEventListener('click', e => { if (e.target === $('backupModal')) closeBackup(); });
+      $('exportBtn').addEventListener('click', exportTasks);
+      $('importBtn').addEventListener('click', () => $('importFile').click());
+      $('importFile').addEventListener('change', e => { importTasks(e.target.files[0]); e.target.value = ''; });
       document.addEventListener('visibilitychange', () => { if (!document.hidden) checkReminders(); });
 
       $('todayLabel').textContent = new Intl.DateTimeFormat('fr-FR', { weekday:'long', day:'numeric', month:'long' }).format(new Date());
-      seedIfEmpty(); renderColorChoices(COLORS[0]); render(); updateNotificationButton(); checkReminders(); setInterval(checkReminders, 30000);
+      seedIfEmpty(); renderColorChoices(COLORS[0]); render(); updateNotificationButton(); checkReminders(); setInterval(checkReminders, 30000); pushToWidget();
     })();
   </script>
 </body>
