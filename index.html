@@ -318,7 +318,7 @@ if ('serviceWorker' in navigator) {
         try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; }
         catch { return []; }
       }
-      function saveTasks() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state.tasks)); pushToWidget(); }
+      function saveTasks() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state.tasks)); pushToWidget(); pushReminders(); }
 
       // --- Application Android : envoie les 5 prochaines tâches au widget ---
       const IN_ANDROID_APP = typeof window.AndroidWidget !== 'undefined';
@@ -333,6 +333,33 @@ if ('serviceWorker' in navigator) {
           window.AndroidWidget.updateTasks(JSON.stringify({ tasks: next }));
         } catch (e) { console.warn('Widget non mis à jour', e); }
       }
+
+      // --- Application Android : rappels natifs (fonctionnent appli fermée) ---
+      const HAS_NATIVE_REMINDERS = IN_ANDROID_APP && typeof window.AndroidWidget.scheduleReminders === 'function';
+      function pushReminders() {
+        if (!HAS_NATIVE_REMINDERS) return;
+        try {
+          const now = Date.now();
+          const reminders = state.tasks
+            .filter(t => !t.done && t.reminder && t.reminder !== 'none' && t.dueDate && t.dueTime)
+            .map(t => {
+              const due = new Date(`${t.dueDate}T${t.dueTime}:00`).getTime();
+              return { id: t.id, title: t.title, body: `${t.project ? t.project + ' · ' : ''}${t.dueTime}`, at: due - Number(t.reminder) * 60000 };
+            })
+            .filter(r => Number.isFinite(r.at) && r.at > now)
+            .sort((a,b) => a.at - b.at)
+            .slice(0, 100);
+          window.AndroidWidget.scheduleReminders(JSON.stringify({ reminders }));
+        } catch (e) { console.warn('Rappels non programmés', e); }
+      }
+      function nativeNotificationsAllowed() {
+        try { return HAS_NATIVE_REMINDERS && window.AndroidWidget.hasNotificationPermission(); } catch { return false; }
+      }
+      window.__onNotificationPermission = granted => {
+        updateNotificationButton();
+        if (granted === true) showToast('Rappels activés');
+        if (granted === false) showToast('Notifications refusées');
+      };
 
       // --- Sauvegarde : export / import ---
       function exportTasks() {
@@ -497,6 +524,7 @@ if ('serviceWorker' in navigator) {
         if (!task.title || !task.dueDate) return;
         if (existing) Object.assign(existing, task); else state.tasks.push(task);
         saveTasks(); closeModal(); render(); showToast(existing ? 'Tâche mise à jour' : 'Tâche ajoutée'); checkReminders();
+        if (HAS_NATIVE_REMINDERS && task.reminder !== 'none' && !nativeNotificationsAllowed()) requestNotifications();
       }
       function toggleTask(id) {
         const task = state.tasks.find(t => t.id === id); if (!task) return;
@@ -523,13 +551,19 @@ if ('serviceWorker' in navigator) {
         state.tasks = state.tasks.filter(t => t.id !== id); saveTasks(); closeModal(); render(); showToast('Tâche supprimée');
       }
       async function requestNotifications() {
-        if (!('Notification' in window)) return showToast(IN_ANDROID_APP ? 'Rappels bientôt disponibles dans l\'appli' : 'Notifications non prises en charge');
+        if (HAS_NATIVE_REMINDERS) {
+          if (nativeNotificationsAllowed()) return showToast('Rappels déjà activés');
+          window.AndroidWidget.requestNotificationPermission();
+          return;
+        }
+        if (!('Notification' in window)) return showToast(IN_ANDROID_APP ? 'Mets à jour l\'appli pour activer les rappels' : 'Notifications non prises en charge');
         const result = await Notification.requestPermission();
         showToast(result === 'granted' ? 'Notifications activées' : 'Notifications refusées');
         updateNotificationButton();
       }
       function updateNotificationButton() {
-        $('notificationBtn').textContent = ('Notification' in window && Notification.permission === 'granted') ? '🔔' : '🔕';
+        const on = HAS_NATIVE_REMINDERS ? nativeNotificationsAllowed() : ('Notification' in window && Notification.permission === 'granted');
+        $('notificationBtn').textContent = on ? '🔔' : '🔕';
       }
       function checkReminders() {
         if (!('Notification' in window) || Notification.permission !== 'granted') return;
@@ -582,7 +616,7 @@ if ('serviceWorker' in navigator) {
       document.addEventListener('visibilitychange', () => { if (!document.hidden) checkReminders(); });
 
       $('todayLabel').textContent = new Intl.DateTimeFormat('fr-FR', { weekday:'long', day:'numeric', month:'long' }).format(new Date());
-      seedIfEmpty(); renderColorChoices(COLORS[0]); render(); updateNotificationButton(); checkReminders(); setInterval(checkReminders, 30000); pushToWidget();
+      seedIfEmpty(); renderColorChoices(COLORS[0]); render(); updateNotificationButton(); checkReminders(); setInterval(checkReminders, 30000); pushToWidget(); pushReminders();
     })();
   </script>
 </body>
